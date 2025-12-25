@@ -1,9 +1,44 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from "react";
+import { Client } from "@langchain/langgraph-sdk";
+import { useStream } from "@langchain/langgraph-sdk/react";
 
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-};
+// Error Boundary to catch runtime errors
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Error caught by boundary:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-screen items-center justify-center bg-slate-900 text-white">
+          <div className="text-center p-8">
+            <h1 className="text-2xl font-bold mb-4">Something went wrong</h1>
+            <p className="text-red-400 mb-4">{this.state.error?.message}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 bg-violet-600 rounded-lg hover:bg-violet-500"
+            >
+              Reload Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export { ErrorBoundary };
 
 type Thread = {
   id: string;
@@ -11,7 +46,10 @@ type Thread = {
   messageCount: number;
 };
 
-const API_URL = "http://localhost:3001";
+// LangGraph CLI runs on port 2024 by default
+const API_URL = "http://localhost:2024";
+const client = new Client({ apiUrl: API_URL });
+const ASSISTANT_ID = "agent"; // Must match the graph name in langgraph.json
 
 // Get or create user ID from localStorage
 function getUserId(): string {
@@ -73,132 +111,105 @@ const BotIcon = () => (
 );
 
 export default function App() {
-  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [userId] = useState(getUserId);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-scroll to bottom
+  /* ---------------- STREAM ---------------- */
+  const stream = useStream({
+    apiUrl: API_URL,
+    assistantId: ASSISTANT_ID,
+    threadId: threadId ?? undefined,
+    onThreadId: (newThreadId) => {
+      // Capture thread ID when useStream creates a new thread
+      if (newThreadId && newThreadId !== threadId) {
+        setThreadId(newThreadId);
+        loadThreads();
+      }
+    },
+  });
+
+  const { messages = [], isLoading } = stream;
+
+  /* ---------------- EFFECTS ---------------- */
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Load threads on mount
   useEffect(() => {
     loadThreads();
   }, [userId]);
 
-  // Auto-resize textarea
   useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-      inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 200) + "px";
-    }
+    if (!inputRef.current) return;
+    inputRef.current.style.height = "auto";
+    inputRef.current.style.height =
+      Math.min(inputRef.current.scrollHeight, 200) + "px";
   }, [input]);
+
+  /* ---------------- THREADS ---------------- */
 
   async function loadThreads() {
     try {
-      const res = await fetch(`${API_URL}/users/${userId}/threads`);
-      if (res.ok) {
-        const data = await res.json();
-        setThreads(data);
-      }
-    } catch (error) {
-      console.error("Failed to load threads:", error);
+      const results = await client.threads.search({
+        metadata: { user_id: userId },
+        limit: 100,
+      });
+
+      setThreads(
+        results.map((t) => ({
+          id: t.thread_id,
+          title: (t.metadata?.title as string) ?? "New Chat",
+          messageCount: (t.metadata?.message_count as number) ?? 0,
+        }))
+      );
+    } catch (e) {
+      console.error("Load threads failed", e);
     }
   }
 
   async function loadThread(id: string) {
-    try {
-      const res = await fetch(`${API_URL}/threads/${id}?userId=${userId}`);
-      if (res.ok) {
-        const data = await res.json();
-        setThreadId(id);
-        setMessages(
-          data.messages.map((m: { role: string; content: string }) => ({
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          }))
-        );
-      }
-    } catch (error) {
-      console.error("Failed to load thread:", error);
-    }
-  }
-
-  function startNewThread() {
-    setThreadId(null);
-    setMessages([]);
-    inputRef.current?.focus();
+    setThreadId(id);
   }
 
   async function deleteThread(id: string) {
-    try {
-      const res = await fetch(`${API_URL}/threads/${id}?userId=${userId}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        if (threadId === id) {
-          setThreadId(null);
-          setMessages([]);
-        }
-        loadThreads();
-      }
-    } catch (error) {
-      console.error("Failed to delete thread:", error);
-    }
+    await client.threads.delete(id);
+    if (id === threadId) setThreadId(null);
+    loadThreads();
   }
+
+  /* ---------------- SEND MESSAGE ---------------- */
 
   async function sendMessage() {
     if (!input.trim() || isLoading) return;
 
     const userMessage = input.trim();
     setInput("");
-    setIsLoading(true);
-
-    setMessages((prev) => [...prev, { role: "user" as const, content: userMessage }]);
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userMessage,
-          userId,
-          threadId,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        if (!threadId && data.threadId) {
-          setThreadId(data.threadId);
-          loadThreads();
+      stream.submit(
+        { messages: [{ type: "human", content: userMessage }] },
+        {
+          threadId: threadId ?? undefined,
+          config: {
+            configurable: {
+              user_id: userId,
+            },
+          },
+          metadata: {
+            user_id: userId,
+            title: userMessage.slice(0, 50), // Use first message as thread title
+          },
         }
-
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant" as const, content: data.reply },
-        ]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant" as const, content: `Error: ${data.error}` },
-        ]);
-      }
-    } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant" as const, content: "Error: Failed to connect to server" },
-      ]);
-    } finally {
-      setIsLoading(false);
+      );
+    } catch (e) {
+      console.error("Send failed", e);
     }
   }
 
@@ -221,7 +232,7 @@ export default function App() {
           {/* Sidebar Header */}
           <div className="p-4">
             <button
-              onClick={startNewThread}
+              onClick={() => setThreadId(null)}
               className="w-full py-3 px-4 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2 shadow-lg shadow-violet-500/20 hover:shadow-violet-500/30"
             >
               <PlusIcon />
@@ -336,36 +347,47 @@ export default function App() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`flex gap-4 ${m.role === "user" ? "flex-row-reverse" : ""}`}
-                  >
+                {messages.map((m, i) => {
+                  const role = m.type === "human" ? "user" : "assistant";
+
+                  return (
                     <div
-                      className={`w-9 h-9 rounded-xl flex-shrink-0 flex items-center justify-center ${
-                        m.role === "user"
-                          ? "bg-gradient-to-br from-emerald-500 to-teal-600"
-                          : "bg-gradient-to-br from-violet-500 to-indigo-600"
-                      }`}
-                    >
-                      {m.role === "user" ? <UserIcon /> : <BotIcon />}
-                    </div>
-                    <div
-                      className={`flex-1 max-w-[80%] ${m.role === "user" ? "flex justify-end" : ""}`}
+                      key={i}
+                      className={`flex gap-4 ${role === "user" ? "flex-row-reverse" : ""}`}
                     >
                       <div
-                        className={`inline-block px-4 py-3 rounded-2xl ${
-                          m.role === "user"
-                            ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-tr-md"
-                            : "bg-slate-800/80 text-slate-200 rounded-tl-md border border-slate-700/50"
+                        className={`w-9 h-9 rounded-xl flex-shrink-0 flex items-center justify-center ${
+                          role === "user"
+                            ? "bg-gradient-to-br from-emerald-500 to-teal-600"
+                            : "bg-gradient-to-br from-violet-500 to-indigo-600"
                         }`}
                       >
-                        <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed">{m.content}</pre>
+                        {role === "user" ? <UserIcon /> : <BotIcon />}
+                      </div>
+
+                      <div
+                        className={`flex-1 max-w-[80%] ${
+                          role === "user" ? "flex justify-end" : ""
+                        }`}
+                      >
+                        <div
+                          className={`inline-block px-4 py-3 rounded-2xl ${
+                            role === "user"
+                              ? "bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-tr-md"
+                              : "bg-slate-800/80 text-slate-200 rounded-tl-md border border-slate-700/50"
+                          }`}
+                        >
+                          <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed">
+                            {typeof m.content === "string"
+                              ? m.content
+                              : JSON.stringify(m.content, null, 2)}
+                          </pre>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-                
+                  );
+                })}
+
                 {isLoading && (
                   <div className="flex gap-4">
                     <div className="w-9 h-9 rounded-xl flex-shrink-0 flex items-center justify-center bg-gradient-to-br from-violet-500 to-indigo-600">
@@ -373,13 +395,14 @@ export default function App() {
                     </div>
                     <div className="bg-slate-800/80 border border-slate-700/50 px-4 py-3 rounded-2xl rounded-tl-md">
                       <div className="flex items-center gap-1.5">
-                        <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" />
                         <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: "150ms" }} />
                         <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: "300ms" }} />
                       </div>
                     </div>
                   </div>
                 )}
+
                 <div ref={messagesEndRef} />
               </div>
             )}
