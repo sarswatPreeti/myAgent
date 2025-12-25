@@ -12,14 +12,34 @@ package-lock.json
 # Build outputs
 dist/
 build/
+.next/
+out/
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+*.log
 
-# LangGraph API
-.langgraph_api
+# LangGraph
+.langgraph_api/
+
+# Docker (contains sensitive credentials)
+docker-compose.yml
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+vite.config.ts.timestamp-*
+
+# Testing
+coverage/
+
+# Misc
+*.local
