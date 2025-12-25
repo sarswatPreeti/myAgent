@@ -1,7 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage } from "@langchain/core/messages";
 import { LangGraphRunnableConfig } from "@langchain/langgraph";
-import { memoryStore } from "./graph.js";
+import { memoryStore } from "./memoryStore.js";
 
 // Use OpenRouter API (compatible with OpenAI SDK)
 const llm = new ChatOpenAI({
@@ -56,15 +56,15 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
   // Namespace for this user's memories: [user_id, "memories"]
   const namespace = [userId || "anonymous", "memories"];
   
-  // Get existing memories about this user from LangGraph's store
+  // Get existing memories about this user from our PostgreSQL memory store
   let userMemories: string[] = [];
   if (userId) {
     try {
       const items = await memoryStore.search(namespace);
-      console.log(`🔍 DEBUG: Found ${items.length} items in store for namespace ${namespace.join(":")}`);
+      console.log(`🔍 DEBUG: Found ${items.length} items in PostgreSQL for namespace ${namespace.join(":")}`);
       userMemories = items.map((item: any) => item.value?.fact).filter(Boolean);
       if (userMemories.length > 0) {
-        console.log(`📚 Loaded ${userMemories.length} memories for user`);
+        console.log(`📚 Loaded ${userMemories.length} memories for user:`, userMemories);
       }
     } catch (e) {
       console.error("❌ Error loading memories:", e);
@@ -74,9 +74,9 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
   }
 
   // Build system message with user memories
-  let systemContent = "You are a helpful AI assistant.";
+  let systemContent = "You are a helpful AI assistant with memory. You remember things users tell you about themselves across conversations.";
   if (userMemories.length > 0) {
-    systemContent += `\n\nThings you remember about this user from previous conversations:\n${userMemories.map((m) => `- ${m}`).join("\n")}\n\nUse this information naturally in your responses when relevant.`;
+    systemContent += `\n\nIMPORTANT - Things you remember about this user from previous conversations:\n${userMemories.map((m) => `- ${m}`).join("\n")}\n\nUse this information naturally in your responses. If the user asks who they are or something you know, tell them!`;
   }
 
   const messagesWithSystem = [
@@ -86,9 +86,10 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
 
   const response = await llm.invoke(messagesWithSystem);
 
-  // Extract and save new facts about the user
+  // Extract and save new facts about the user (await to ensure it completes)
   if (userId) {
-    extractUserFacts(state.messages).then(async (newFacts) => {
+    try {
+      const newFacts = await extractUserFacts(state.messages);
       for (const fact of newFacts) {
         // Check if we already have this fact
         const isDuplicate = userMemories.some((m) => 
@@ -99,10 +100,12 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
         if (!isDuplicate) {
           const memoryId = `memory_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           await memoryStore.put(namespace, memoryId, { fact, createdAt: new Date().toISOString() });
-          console.log(`💾 New memory saved: "${fact.slice(0, 50)}..."`);
+          console.log(`💾 New memory saved to PostgreSQL: "${fact}"`);
         }
       }
-    }).catch((e) => console.error("❌ Error saving memory:", e));
+    } catch (e) {
+      console.error("❌ Error saving memory:", e);
+    }
   }
 
   return {
