@@ -1,7 +1,16 @@
 import { ChatOpenAI } from "@langchain/openai";
-import { SystemMessage } from "@langchain/core/messages";
+import { SystemMessage, HumanMessage, ToolMessage, AIMessage  } from "@langchain/core/messages";
 import { LangGraphRunnableConfig } from "@langchain/langgraph";
-import { memoryStore } from "./memoryStore.js";
+import { memoryStore } from "./memoryStore.ts";
+import { MultiServerMCPClient } from "@langchain/mcp-adapters";
+
+const client = new MultiServerMCPClient({  
+    weather: {
+        transport: "http",  // HTTP-based remote server
+        // Ensure you start your weather server on port 8000
+        url: "http://localhost:8000/mcp",
+    },
+});
 
 // Use OpenRouter API (compatible with OpenAI SDK)
 const llm = new ChatOpenAI({
@@ -11,6 +20,9 @@ const llm = new ChatOpenAI({
     baseURL: "https://openrouter.ai/api/v1",
   },
 });
+
+const tools = await client.getTools();
+const llmWithTools = llm.bindTools(tools);
 
 // Helper to extract facts about the user from conversation
 async function extractUserFacts(messages: any[]): Promise<string[]> {
@@ -32,7 +44,10 @@ ${conversation}
 
 JSON array:`;
 
-    const result = await llm.invoke([{ role: "user", content: extractionPrompt }]);
+    const result = await llm.invoke([
+      new HumanMessage(extractionPrompt),
+    ]);
+
     const content = typeof result.content === "string" ? result.content : "";
     
     // Parse JSON from response
@@ -79,17 +94,36 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
     systemContent += `\n\nIMPORTANT - Things you remember about this user from previous conversations:\n${userMemories.map((m) => `- ${m}`).join("\n")}\n\nUse this information naturally in your responses. If the user asks who they are or something you know, tell them!`;
   }
 
-  const messagesWithSystem = [
-    new SystemMessage(systemContent),
-    ...state.messages,
-  ];
+  const last = state.messages[state.messages.length - 1];
 
-  const response = await llm.invoke(messagesWithSystem);
+  const hasSystem = state.messages.some(
+    (m: any) => m._getType?.() === "system"
+  );
+
+  const baseMessages = hasSystem
+    ? state.messages
+    : [
+        new SystemMessage(
+          "You are a helpful assistant. If you receive tool results, you MUST use them to answer the user."
+        ),
+        ...state.messages,
+      ];
+
+  // ✅ CRITICAL: If last message is ToolMessage, FORCE the model to answer
+  if (last instanceof ToolMessage) {
+    const response = await llmWithTools.invoke(baseMessages);
+    return { messages: [response] };
+  }
+
+  const response = await llmWithTools.invoke(baseMessages);
 
   // Extract and save new facts about the user (await to ensure it completes)
   if (userId) {
     try {
+      const last = state.messages[state.messages.length - 1];
+      if (last?.tool_calls?.length) return { messages: [response] };
       const newFacts = await extractUserFacts(state.messages);
+
       for (const fact of newFacts) {
         // Check if we already have this fact
         const isDuplicate = userMemories.some((m) => 
@@ -110,5 +144,31 @@ export async function chatAgent(state: any, config: LangGraphRunnableConfig) {
 
   return {
     messages: [response],
+  };
+}
+
+export async function toolNode(state: any) {
+  const lastMessage = state.messages[state.messages.length - 1];
+
+  if (!lastMessage.tool_calls?.length) {
+    return {};
+  }
+
+  const toolCall = lastMessage.tool_calls[0];
+  const tool = tools.find(t => t.name === toolCall.name);
+
+  if (!tool) {
+    throw new Error(`❌ Tool not found: ${toolCall.name}`);
+  }
+
+  const result = await tool.invoke(toolCall.args);
+
+  return {
+    messages: [
+      new ToolMessage({
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(result),
+      }),
+    ],
   };
 }
