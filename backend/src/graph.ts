@@ -30,7 +30,7 @@ const workflow = new StateGraph(ChatState)
     const last = state.messages[state.messages.length - 1];
     const toolCalls = getToolCalls(last);
 
-    if (last instanceof AIMessage && toolCalls.length > 0) {
+    if ( toolCalls.length > 0) {
       return "tool";
     }
     return END;
