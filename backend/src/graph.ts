@@ -1,11 +1,10 @@
-// graph.ts
-import { StateGraph, START, END, Annotation} from "@langchain/langgraph";
+import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { BaseMessage } from "@langchain/core/messages";
 import { chatAgent } from "./agent.js";
 
-// --------------------
-// 1️⃣ Define Chat State
-// --------------------
+/* ---------------------------------- */
+/* STATE */
+/* ---------------------------------- */
 const ChatState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
     reducer: (current, update) => current.concat(update),
@@ -13,15 +12,12 @@ const ChatState = Annotation.Root({
   }),
 });
 
-// --------------------
-// 2️⃣ Build Workflow Graph
-// --------------------
+/* ---------------------------------- */
+/* GRAPH */
+/* ---------------------------------- */
 const workflow = new StateGraph(ChatState)
   .addNode("agent", chatAgent)
   .addEdge(START, "agent")
   .addEdge("agent", END);
 
-// --------------------
-// 3️⃣ Compile Graph (LangGraph CLI handles checkpointing)
-// --------------------
 export const chatGraph = workflow.compile();

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github.com/marcopesani/mcp-server-serper": {
+      "command": "npx",
+      "args": ["-y", "serper-search-scrape-mcp-server"],
+      "env": {
+        "SERPER_API_KEY": "b408a3420c2810c6441e4a825617e12dd069485b"
+      },
+      "disabled": false,
+      "autoApprove": ["google_search", "scrape"]
+    }
+  }
+}
